@@ -110,3 +110,83 @@ ping(ip): Sends a tiny test message to an IP address. If the device replies, it 
 resolve(ip): Tries to find the name of a device from its IP. For example: 192.168.1.1 → "router.local" 192.168.1.42 → "nas.local" If no name is found, it returns "unknown". scan_port(ip, port): Tries to connect to one specific port on a device. If the connection works → port is OPEN (True). If the connection is refused or times out → CLOSED (False). This is like knocking on door number 22 of a house. If someone answers, the door is open. scan_host(ip, ports): Combines ping + resolve + scan_port for ONE device. First checks if the device is alive. If alive → resolves its name → checks all ports. Returns a dictionary (a record) like: { "ip": "192.168.1.1", "hostname": "router.local", "open_ports": [22, 80, 443], "last_seen": "2026-05-22 14:30:00" } If the device is offline → returns nothing (None). expand_cidr(cidr): Takes a subnet range like "192.168.1.0/24" and expands it into a full list of all IP addresses:["192.168.1.1", "192.168.1.2", ..., "192.168.1.254"] The /24 means 254 possible addresses. Without this, you would have to type every IP by hand. do_scan(targets, ports, workers=64): The main scanning engine. It takes a list of IPs and scans ALL of them at the same time using 64 parallel "workers" (threads). Without parallel scanning: Scan 254 IPs one by one = very slow (minutes) With 64 parallel workers: All 254 IPs scanned almost simultaneously = fast As hosts are found, it prints them live to the screen.
 
 # SECTION 5 (COMMANDS)
+
+These are the main actions the user can run. cmd_init(target, ports, force): This runs when you type: netwatch init 192.168.1.0/24 Step by step:
+
+1. Checks if a baseline already exists for this target.
+2. If it exists and --force was NOT used → stops and warns you (to avoid overwriting accidentally).
+3. Expands the CIDR range into individual IPs.
+4. Runs do_scan() to scan all of them.
+5. Saves all results + a SHA-256 fingerprint into a JSON file inside ~/.netwatch/baselines/.
+6. Prints how many hosts were found. ───────────────────────────────── cmd_check(target, ports): ───────────────────────────────── This runs when you type: netwatch check 192.168.1.0/24
+  This is the most important command. Here is what it does:
+
+1. Loads the saved baseline (old photo).
+2. Runs a fresh scan (takes a new photo).
+3. Compares old vs new — looks for 3 types of changes: NEW HOST: An IP that appears in the new scan but was NOT in the baseline. Could be an unauthorized device! MISSING HOST: An IP that was in the baseline but did NOT respond in the new scan. Device might be off, or unplugged from the network. PORT CHANGE: A known host now has different ports open. Maybe someone started a new service (opened a port) or shut one down (closed a port). Example: Port 23 (Telnet) suddenly opened on your router = suspicious!
+
+4. If nothing changed → prints green "Unchanged" message.
+5. If changes found → prints red/yellow alerts for each one.
+───────────────────────────────── cmd_update(target, ports): ───────────────────────────────── This runs when you type: netwatch update 192.168.1.0/24 Use this when YOU made a legitimate change to the network and want netwatch to accept the new state.
+
+For example:
+* You added a new computer → update baseline.
+
+
+*  You opened port 443 on your server → update baseline.It rescans and overwrites the old baseline.
+───────────────────────────────── cmd_list(): ───────────────────────────────── This runs when you type: netwatch list Lists all the baseline files currently stored. Shows the target, how many hosts, and when it was last scanned.
+
+───────────────────────────────── cmd_remove(target): ───────────────────────────────── This runs when you type: netwatch remove 192.168.1.0/24 Deletes the baseline file for that target. Use this if you no longer want to monitor a specific network range.
+
+# SECTION 6 (ARGUMENT PARSING)-Lines 263–320
+``` bash
+def parse_ports(s):
+    def main():
+```
+parse_ports(s): Converts the --ports argument from a string into a list of numbers. Examples: "22,80,443" → [22, 80, 443] "1-1024" → [1, 2, 3, ..., 1024] "22,80,1-100"→ [22, 80, 1, 2, ..., 100] main(): This is the entry point — the very first thing that runs when you execute netwatch.
+
+It uses argparse to:
+
+1. Read what command you typed (init/check/update/etc.)
+2. Read any extra options (--ports, --force)
+3. Call the correct function based on the command Think of it as the receptionist of the program. You walk in, tell it what you want, and it directs you to the right department.
+
+# SECTION 7 — HOW IT ALL CONNECTS (The Big Picture)
+
+Here is the full flow in plain English:
+
+YOU TYPE: netwatch init 192.168.1.0/24 ↓ main() reads "init" and calls cmd_init() ↓ cmd_init() calls expand_cidr() to get all 254 IPs ↓ cmd_init() calls do_scan() with those 254 IPs ↓ do_scan() uses 64 threads to call scan_host() for each IP ↓ scan_host() calls ping() → resolve() → scan_port() x16 ↓ Results collected → fingerprint() creates a SHA-256 hash ↓ save_baseline() writes everything to a JSON file ↓ Done! "✔ Baseline stored"
+
+────────────────────────────────────
+
+YOU TYPE: netwatch check 192.168.1.0/24 ↓ main() reads "check" and calls cmd_check() ↓ load_baseline() reads the old JSON file ↓ do_scan() runs a fresh scan of the same range ↓ Old results vs New results are compared ↓ Differences become alerts (NEW HOST, PORT CHANGE, etc.) ↓ Alerts printed to the terminal in red/yellow ↓ Done!
+
+# SECTION 8 (KEY CONCEPT SUMMARISED)
+
+CONCEPT WHAT IT MEANS IN SIMPLE TERMS ───────────────────────────────────────────────────────── Baseline A saved snapshot of your network state Hash (SHA-256) A unique fingerprint made from data CIDR (/24) A shorthand for a range of IP addresses Port A numbered "door" on a computer for a specific type of network traffic Thread A mini-task running in parallel with others JSON A simple text format for storing structured data Ping A test message to check if a device is online Resolve Looking up the name of a device by its IP
+
+# SECTION 9 (THE BASELINE FILE) What Gets Saved
+
+After running "netwatch init", a file like this is created at: /root/.netwatch/baselines/192-168-1-0_24.json
+
+{ "target": "192.168.1.0/24", "ports": [22, 80, 443, ...], "created_at": "2026-05-22 14:30:00", "hosts": { "192.168.1.1": { "ip": "192.168.1.1", "hostname": "router.local", "open_ports": [22, 80, 443], "last_seen": "2026-05-22 14:30:00" }, "192.168.1.42": { "ip": "192.168.1.42", "hostname": "nas.local", "open_ports": [22, 445], "last_seen": "2026-05-22 14:30:00" } }, "checksum": "a3f5c8d2e1b94f67..." }
+
+The "checksum" at the bottom is the SHA-256 hash of all the hosts data. If someone edits this file manually, the checksum will no longer match — and netwatch will know the baseline itself was tampered with.
+
+
+
+
+
+# === END OF EXPLANATION
+move the file to /usr/local/bin/
+``` bash
+sudo mv netwatch /usr/local/bin/
+```
+exicute the file
+``` bash
+chmod +x netwatch
+```
+run the file using a designated ip address
+``` bash
+netwatch (ip adder)
+```
